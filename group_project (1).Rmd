@@ -1,0 +1,664 @@
+---
+title: "Group project - G2"
+author:
+- Hamza Sajjad
+- Kafia Elmi
+- Ebenezer Tafese
+- Natalia Latinović
+- Bas Verkennis
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+    code_download: no
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+subtitle: Bayesian Multilevel Models
+---
+
+```{r setup, include = FALSE}
+options(max.print= 120,
+        width = 90,
+        tibble.width = 80)
+knitr::opts_chunk$set(echo= TRUE,
+                      cache=FALSE,
+                      prompt=FALSE,
+                      tidy="styler",
+                      comment=NA,
+                      message=FALSE,
+                      warning=TRUE)
+
+knitr::opts_knit$set(width=90)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+set.seed(42)
+```
+
+# Checklist {.unnumbered}
+
+The submission includes the following.
+
+-   [ ] RMD/R document where it's clear what is the code that corresponds to each question.
+-   [ ] Dataset
+-   [ ] html/PDF document with the following
+    -   [ ] Numbered questions and answers with text and all the necessary code.
+    -   [ ] Cover with group number and name of all group members
+    -   [ ] Details of specification of the work done by group members (e.g., who found the data, who did the pre-processing, who answered which questions, etc).
+
+# Group project {.unnumbered}
+
+For the project, we use the following packages:
+
+```{r message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(brms)
+library(ggplot2)
+library(tidyr)
+library(glue)
+library(loo)
+library(caret)
+library(reshape2)
+ggplot2::theme_set(ggplot2::theme_light()) # nicer theme
+options(mc.cores = parallel::detectCores()) # paralellize if possible
+options(brms.file_refit = "on_change") # save the files if the model has changed
+library(ggrepel) #to avoid overlapping texts
+
+
+
+#install:
+# install.packages("remotes")
+# remotes::install_github("n-kall/priorsense")
+library(priorsense)
+#nice plotting theme:
+theme_set(theme_linedraw() +
+            theme(panel.grid = element_blank()))
+
+```
+
+## 1. Dataset Selection (1pt)
+
+Select a dataset with clusters such as schools, regions, or people with multiple observations per individual. (From for example, <https://www.kaggle.com/>) It would be a good idea to choose a smallish dataset (not too many rows, e.g., less than 1000) or subset it so that fitting the models doesn't take too long.
+
+a.  Describe the dataset with a couple of short sentences. What was its intended use? Are there papers that reference it? Provide information on how to obtain the dataset, including its source and any necessary preprocessing steps/feature engineering.
+
+The dataset contains user experiences in virtual reality (VR), including physiological responses, emotional states, and user preferences. It aims to improve VR technology by analyzing how users respond to different VR environments. Variables include user ID, age, gender, VR headset type, duration, motion sickness rating, and immersion level. This dataset enables developers to optimize VR systems and create tailored, immersive experiences for enhanced user satisfaction.
+
+You can obtain the dataset by downloading it from the kaggle repository, following this link: <https://www.kaggle.com/datasets/aakashjoshi123/virtual-reality-experiences>
+
+```{r Data Processing, error=FALSE, message=FALSE, warning=FALSE}
+# load the data and preprocessing steps go here
+f <- file.choose() 
+data <- read.csv(file = f,stringsAsFactors = F)
+data$Age <- as.numeric(x = scale(x = data$Age,center = T))
+data$Duration <- as.vector(x = scale(x = data$Duration,center = T))
+data$ImmersionLevel <- ifelse(data$ImmersionLevel >= 3,yes = 1,no = 0)
+data$MotionSickness <- as.numeric(x = scale(x = data$MotionSickness,center = T,
+                                            scale = F))
+data$Gender <- factor(data$Gender, levels = c("Female", "Male", "Other"), 
+                      labels = c(0, 1, 2))
+data$Gender <- as.numeric(data$Gender)
+data$VRHeadset <- factor(data$VRHeadset,
+                         levels = c("HTC Vive", "PlayStation VR", "Oculus Rift")
+                         ,labels = c(0, 1, 2))
+data$VRHeadset <- as.numeric(data$VRHeadset)
+print(data)
+
+```
+
+b.  Report its number of observations, columns (with their meaning) and their data types.
+
+1000 observations. 7 columns which are the following variables: - User ID (Character/String): A unique identifier for each user in the VR experience dataset. - Age (Numeric): The age of the user at the time of the VR experience. - Gender (Character/String): The gender identity of the user, with options such as 'Male', 'Female', or 'Other'. - VR Headset Type (Character/String): The type of VR headset used by the user, such as 'Oculus Rift', 'HTC Vive', or 'PlayStation VR'. - Duration (Numeric): The duration of the VR experience in minutes. - Motion Sickness Rating (Numeric): The user's self-reported rating of motion sickness experienced during the VR experience. - Immersion Level (Numeric): The subjective level of immersion reported by the user on a scale of 1 to 5. In an attempt to reduce the complexity of the required model for an ordinal dependent variable, we dichotomized Immersion Level to a 0-1 variable. We chose any value above 3 to signify 'having felt immersed' and any value below as 'not having felt immersed'.
+
+## 2. Research Question (0.5pt)
+
+Formulate a research question that involves predicting a specific outcome variable based on the available dataset.
+
+How do different factors, including VR headset type, duration of VR experience, motion sickness rating, and user demographics (age and gender), affect the feeling of having felt immersed reported by users in virtual reality environments?
+
+## 3. Model Exploration (3pt)
+
+a.  Fit multiple appropriate models to the data set (as many models as there are members in the group, with a minimum of two models). Models might vary in the multilevel structure, informativeness of their priors (but not just trivial changes), model of the data/likelihood, etc. (I recommend not to use no pooling models since they tend to take a long time and it's very hard to assign good priors).
+
+Since our group consists of five members. We have made five models.
+
+Model 1: A pooled model
+
+Model 2: An varying intercepts model
+
+Model 3: A varying slopes model
+
+Model 4: A varying intercepts & slopes model
+
+Model 5: A correlated varying intercepts & slopes model
+
+```{r Model 1, error=FALSE, message=FALSE, warning=FALSE}
+# Model 1 - Pooled model
+def_priors_f <-
+  c(prior(normal(0,1), class = Intercept),
+    prior(normal(0, 1), class = 'b', coef = Age),
+    prior(normal(0, 1), class = 'b', coef = Duration))
+
+model1 <- brm(ImmersionLevel ~ Age + Duration ,  data = data,
+              family = bernoulli(link = logit),prior = def_priors_f,
+              file = "model1",save_model = 'model1')
+```
+
+```{r Model 2, error=FALSE, message=FALSE, warning=FALSE}
+# Model 2 - Varying intercept model:
+# Priors Normal - uninformative
+def_priors_model_2 <- c(
+  prior_string(glue('exponential({1/sd(data$ImmersionLevel)}'),
+               class = 'sd'))
+model2 <- brm(formula = ImmersionLevel ~ MotionSickness + Duration + (1 | VRHeadset)
+              ,data = data, control = list(adapt_delta = 0.999),family = bernoulli
+              ,cores = 12, iter = 6e3,seed = 123, file = 'model2',save_model = 'model2')
+
+```
+
+```{r Model 3, error=FALSE, message=FALSE, warning=FALSE}
+# Model 3 - Varying slopes model
+def_priors_model_2 <- c(
+  prior_string(glue('exponential({1/sd(data$ImmersionLevel)}'),
+               class = 'sd'))
+
+model3 <- brm(ImmersionLevel ~ Duration + MotionSickness + Age + Gender
+              + (-1 + Duration + MotionSickness + Age + Gender | VRHeadset),
+              data = data, family = bernoulli(link = logit),
+              prior = def_priors_model_2, iter = 8e3, 
+              control = list(adapt_delta = 0.95),seed = 123,
+              file = 'model3',save_model = 'model3')
+```
+
+```{r Model 4, error=FALSE, message=FALSE, warning=FALSE}
+#Model 4 - Varying intercept and slopes model:
+
+# Define/set priors 
+prior_def <- set_prior("normal(0, 1)", class = "b") +
+  set_prior("cauchy(0, 1)", class = "sd")
+
+# Fitting the model
+model4 <- brm(ImmersionLevel ~ Age + Gender + Duration + MotionSickness +
+                     (1 + Age + Gender + Duration + MotionSickness || VRHeadset),
+                   data = data,
+                   prior = prior_def,
+                   family = bernoulli(link = logit), iter = 6e3,
+                   control = list(adapt_delta = 0.99),seed = 123,
+              file = 'model4',save_model = 'model4')
+```
+
+```{r Model 5, error=FALSE, message=FALSE, warning=FALSE}
+# Model 5 - Correlated varying intercept and slopes model
+def_priors <- c(
+  prior_string(glue("normal({mean(data$ImmersionLevel)},
+                    {2.5* sd(data$ImmersionLevel)})"), class = "Intercept"),
+  prior_string(glue("normal(0, {5 * sd(data$ImmersionLevel)})"), class = "b"),
+  prior_string(glue("exponential({ 1/sd(data$ImmersionLevel)})"), class = "sd")
+)
+
+def_priors_hc <- c(
+  def_priors,
+  prior(lkj(2), class = "cor")
+)
+
+model5 <- brm(ImmersionLevel ~ MotionSickness * Gender 
+              + (1 + MotionSickness | VRHeadset), # 1 + is optional
+              data = data,
+              prior = def_priors_hc,
+              iter = 10000,
+              family = bernoulli(link = "logit"),
+              control = list(adapt_delta = .999),
+              seed = 123,
+              sample_prior = TRUE
+              , file = 'model5',save_model = 'model5')
+```
+
+b.  Explain each model and describe its structure (what they assume about potential population- level or group-level effects), and the type of priors used.
+
+**Pooled model -** This models fits a Bayesian logistic regression model to predict ImmersionLevel based on the Age and Duration variables. For the intercept, Age and Duration, the prior specifies a normal distribution with a mean of 0 and a standard deviation of 1 which allows for a wide range of possible values. The reason for setting these priors is due to the fact that the majority of the values centered around zero with somewhat following a normal distribution.
+
+**Varying intercept model -** Unlike the complete pooling model, the varying intercept model allows for capturing group-level relationships with respect to the intercept. In other words, every group, as specified in the model's grouping variable `+( 1 | VRHeadset)` , has its own unique intercept. Though, now there exist multiple intercepts, the fixed effects (variables outside of the random-effects section of the formula) remain fixed across groups. Put another way, in a varying intercept model there exists a global average intercept, which is the grand intercept based on all observations pooled together, however each group is provided its own intercept, calculated as a deviation from the grand intercept, which in turn results in a vector of group-level intercepts normally distributed around the grand intercept. This variability is called the between-group variability, as opposed to the variability within a group, which can be seen as residuals from the estimated best fit line within the group. Default priors were used, as prior sensitivity analysis from the `priorsense` package revealed no data-prior conflicts for the evaluated models during variable selection.
+
+**Varying slopes model** - The analysis uses a Bayesian logistic regression model to study the factors affecting Immersion Level in VR experiences. This varying sloped model assumes predictors like Duration, Motion Sickness, Age, and Gender impact the likelihood of achieving higher Immersion Level. Random effects are included to capture variations among different VR headsets. Objective priors are employed, minimizing assumptions and biases. Normal priors with means at zero and standard deviations based on predictor variables are used for fixed effects. Exponential priors, reflecting positive values, capture headset variations based on reciprocal standard deviations. These priors prioritize smaller values, accommodating fat-tailed distributions. With objective priors, the analysis remains unbiased, focusing on data-driven inference. The chosen model structure and priors allow exploring predictor effects on Immersion Level while maintaining integrity in the analysis.
+
+**Varying intercept & slopes model** - A varying intercept and varying slopes model is a multilevel or hierarchical model. It is used to account for the potential variation in the relationship between independent and dependent variables across different groups. In a varying intercept and varying slopes model, both the intercept and slopes of the regression equation are allowed to vary across the groups. The idea is that different groups may have a different baseline level (intercept) and a different relationship (slope) to the dependent variable. Because of the varying effects, the model can provide more accurate estimates and predictions, as it takes the heterogeneity across groups into account. It allows for the identification of group-specific patterns and can provide insights into how the relationships between variables differ across the different levels of the grouping factor.
+
+**Correlated varying intercept & varying slopes model** -
+
+Structure: We fitted a Bayesian hierarchical linear regression model to examine the relationship between ImmersionLevel and several predictors, including MotionSickness, and Gender. The model also included random intercepts and slopes for MotionSickness within each level of VRHeadset.
+
+Assumptions: Population-level effects: The model assumes that there are fixed effects representing the average relationships between the predictors (MotionSickness, and Gender) and the outcome variable (ImmersionLevel) across the entire population. These effects are assumed to be constant and the same for all levels of the grouping variable (VRHeadset).
+
+Group-level effects: The model incorporates random effects to capture potential variations in the relationships between the predictors and the outcome across different levels of the grouping variable (VRHeadset). Specifically, the model allows for random intercepts and slopes for the predictor MotionSickness within each level of VRHeadset. This means that the effects of MotionSickness on ImmersionLevel can vary across different VRHeadset groups.
+
+Priors: Weakly informative priors, wide normal distributions, express minimal prior knowledge, allowing the data to drive the parameter estimation. For the fixed effects, a normal prior is specified for the intercept (Intercept) and slope (b) parameters, based on the mean and standard deviation of the ImmersionLevel variable. An exponential prior is specified for the residual standard deviation (sigma) parameter. For the random effects, an exponential prior is specified for the standard deviation (sd) of the random effects, and a LKJ prior with parameter 2 is used for the correlation (cor) between the random effects.
+
+## 4. Model checking (2.5pt)
+
+a.  Perform a prior sensitivity analysis for each model and modify or discard the model if appropriate. Justify.
+
+**Model 1 - Pooled Model**
+
+```{r M_C Model 1, error=FALSE, message=FALSE, warning=FALSE}
+print(def_priors_f)
+pss_model1 <- powerscale_sensitivity(x = model1)
+pss_model1
+```
+
+**Model 2 - Varying intercepts model**
+
+```{r M_C Model 2, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Default priors
+pss_model2 <- powerscale_sensitivity(x = model2)
+
+# Prior-data conflict detected!
+pss_model2
+
+# Setting up a new prior using a very wide exponential dist.
+new_prior <- set_prior(prior = "exponential(0.1)",class = 'sd', 
+                       coef = 'Intercept', group = 'VRHeadset')
+
+# Fitting new model with wider prior
+model2a <- brm(formula = ImmersionLevel ~ MotionSickness + 
+                 Duration + (1 | VRHeadset),
+               data = data, control = list(adapt_delta = 0.999),
+               family = bernoulli, cores = 12, iter = 6e3,seed = 123,
+               prior = new_prior,file = 'm2a',save_model = 'm2a')
+
+# Visual diagnostics only loaded once, so are left out. 
+# Maybe it was too hard to load so we just use the diagnostics table
+pss_model2a <- powerscale_sensitivity(x = model2a)
+pss_model2a
+
+# Comparison (as expected no difference)
+loo(model2a,model2,compare = T)
+
+# For some reason, whatever prior i use, the data-conflict doesntseem to resolve
+# Lets just go forward with the original model.
+```
+
+For model 2 we unexpectedly find there is a prior_data conflict for the standard deviation of the group-level intercepts. An attempt to fix this may be to try to specify a wider prior for this parameter, as shown in the code above. However, as shown in the comments a wider prior did not seem to alleviate the issue.
+
+**Model 3 - Varying intercepts model**
+
+We will keep the "model3" model with the wider priors ("def_priors") because changing to narrower priors led to more instances of prior-data conflict and weak likelihood. The narrower priors that were used to compare with are the following:
+
+```{r M_C Model 3, error=FALSE, message=FALSE, warning=FALSE}
+alternative_priors <-   c(prior(normal(0, 5), class = "b"),
+  # Alternative priors for fixed effects coefficients
+  prior(normal(0, 5), class = "Intercept"),                     
+  # Alternative prior for the intercept
+  prior(cauchy(0, 2.5), class = "sd")                           
+  # Alternative prior for the residual standard deviation
+)
+
+model3a <- brm(ImmersionLevel ~ Duration + MotionSickness + Age + Gender + 
+               (-1 + Duration + MotionSickness + Age + Gender | VRHeadset), 
+               data = data, family = bernoulli(link = logit), 
+               prior = alternative_priors, iter = 8e3, 
+               control = list(adapt_delta = 0.95),seed = 123, file = 'm3a',
+               save_model = 'm3a')
+# Comparison results in alternative model not being better and even slightly worse
+loo(model3,model3a,compare = T)
+```
+
+The wider priors, however, reflect higher uncertainty and allow for greater flexibility. In cases of weak likelihood, the specified prior beliefs have a significant impact on the resulting posterior distribution. Prior-data conflict occurs when the prior beliefs and observed data diverge or offer conflicting information. By sticking with the wider priors, we acknowledge the uncertainty and maintain a more reliable model.
+
+**Model 4 - Varying intercepts and slopes model**
+
+```{r M_C Model 4, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+print(prior_def,data = data)
+pss_model4 <- powerscale_sensitivity(x = model4)
+pss_model4
+
+# Here i just defined some alternative priors
+prior_spec_1 <- set_prior("normal(0, 1)", class = "b") +
+  set_prior("cauchy(0, 1)", class = "sd")
+
+prior_spec_2 <- set_prior("normal(0, 10)", class = "b") +
+  set_prior("cauchy(0, 10)", class = "sd")
+
+# I tried fitting the best performing model to the alternative priors
+model_prior_1 <- brm(ImmersionLevel ~ Age + Gender + Duration + MotionSickness +
+                    (1 + Age + Gender + Duration + MotionSickness || VRHeadset),
+                     data = data,
+                     prior = prior_spec_1,
+                     family = bernoulli(link = logit),
+                     control = list(adapt_delta = 0.9), file = 'mp1',
+                    save_model = 'mp1')
+
+model_prior_2 <- brm(ImmersionLevel ~ Age + Gender + Duration + MotionSickness +
+                    (1 + Age + Gender + Duration + MotionSickness || VRHeadset),
+                     data = data,
+                     prior = prior_spec_2,
+                     family = bernoulli(link = logit),
+                     control = list(adapt_delta = 0.9), file = 'mp2',
+                    save_model = 'mp2')
+
+# I compared the initially best performing model (model 4) to the models 
+# with the new alternative priors I created
+loo(model4,model_prior_1,model_prior_2,compare = T)
+
+```
+
+Alternative and wider priors were used to check whether these would improve the models accuracy. However the loo function did not show a significant change in model fit with the usage of the alternative priors over what was used in the initial attempt.
+
+**Model 5 - Correlated varying intercepts and slopes model**
+
+```{r M_C Model 5, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+print(def_priors_hc,data = data)
+pss_model5 <- powerscale_sensitivity(x = model5)
+pss_model5
+```
+
+Model is modified. Adding the other variables: Age and Duration to the model didn't succeed in any change in the predictions. They were both basically 0. However, while trying to tune the priors, I didn't succeed in better priors that removed the prior-data conflict and the weak likelihoods while trying to predict Group-level effects and correlation. I conclude that this is caused by lack of data samples that can represent well the group level effects and correlation.
+
+b.  Conduct posterior predictive checks for each model to assess how well they fit the data. Explain what you conclude.
+
+**Model 1 - Pooled model**
+
+```{r PPC Model 1, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+pp_check(model1)
+pp_check(model1, type = "stat_2d")
+pp_check(model1, type = "bars")
+```
+
+**Model 2 - Varying intercepts model**
+
+```{r PPC Model 2, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Not clear how to adjust the titles of these graphs via pp_check when grouped.
+# Grouped graphs can be interpreted from T-B and L-R going from 
+# 1 to 10 in terms of motion sickness
+pp_check(model2, type = "stat_2d")
+pp_check(model2,type = 'stat')
+pp_check(model2,type = 'stat_grouped',group = 'MotionSickness')
+pp_check(model2,type = 'bars')
+pp_check(model2,type = 'bars_grouped', group = 'MotionSickness')
+
+```
+
+Let us go graph by graph. We find that the first graph shows us a scatterplot of both the mean and the sd. As the proportion of succes in the dataset increase, there appears to be an associated decrease in the standard deviation. The relation between the proportional mean and the standard deviation is given by $$\sigma_p = \sqrt{(p(1-p)}$$ The graph shows us that the posterior distribution of proportions and associated standard deviations more or less corresponds to what would be expected given the data.
+
+Similarly, a histogram of the posterior proportional means are normally distributed around the data-provided proportional mean.
+
+Facetting these histograms we find that for the majority of cases, given a Motion Sickness level, the proportional mean of the data and posterior proportions agree. However, sample sizes per group are small due to the granularity of this grouping variable.
+
+Finally, a boxplot of proportions shows us the same as mentioned above in counts instead of proportions.
+
+**Model 3 - Varying slopes model**
+
+```{r PPC Model 3, cache=TRUE}
+pp_check(model3, ndraws = 200)
+```
+
+After conducting a posterior predictive check on the "model3" model, we have the following observations and conclusions:
+
+Adequate Model Fit: The kernel density estimates of the replicated outcomes (y_rep) closely align with the observed outcomes (y), indicating that our model captures the underlying patterns and variability present in the data. This suggests that the relationship between the predictors and the response variable is appropriately represented.
+
+Reasonable Uncertainty Estimation: The spread and shape of the kernel density estimates around the observed outcomes provide a reliable estimation of uncertainty in our model's predictions. The alignment between the estimates and the observed data suggests that our model's uncertainty estimation reflects the true variability in the data.
+
+Consistency of Predictions: The close alignment between the observed outcomes and the kernel density estimates of the replicated outcomes demonstrates that our model generates predictions consistent with the observed data. This consistency in predictions further reinforces the reliability of our model for future predictions based on the fitted parameters. In summary, the posterior predictive check confirms that the "model3" model provides an adequate fit, reasonable uncertainty estimation, and consistent predictions with the observed data.
+
+**Model 4 - Varying intercept & slopes model**
+
+```{r PPC Model 4, cache=TRUE}
+pp_check(model4, ndraws = 200)
+pp_check(model4, type = "stat_2d")
+pp_check(model4, ndraws = 200, type = "dens_overlay_grouped", 
+         group = "VRHeadset") + xlab("VRHeadset")
+pp_check(model4, ndraws = 200, type = "dens_overlay_grouped", 
+         group = "Gender") + xlab("Gender")
+pp_check(model4, ndraws = 200, type = "dens_overlay", 
+         resp = "MotionSickness") + xlab("MotionSickness")
+pp_check(model4, type = "bars_grouped", group = "VRHeadset") + xlab("VRHeadset")
+pp_check(model4, type = "bars_grouped", group = "Gender") + xlab("Gender")
+pp_check(model4, type = "bars_grouped", group = "MotionSickness") + 
+  xlab("MotionSickness")
+```
+
+The posterior predictive checks show us that the posterior distribution of a varying slopes and intercepts model seem to be quite accurately distributed around our data. Across groups of VR Headsets and Gender we find that the model fit is very accurate, and similarly we find that the predicted counts by group quite well resemble what the data tells us.
+
+**Model 5 - Correlated varying intercept & varying slopes model**
+
+```{r PPC Model 5, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+pp_check(model5, ndraws = 200)
+pp_check(model5, type = "stat_2d")
+pp_check(model5, ndraws = 200, type = "dens_overlay_grouped", 
+         group = "VRHeadset") + xlab("VRHeadset")
+pp_check(model5, ndraws = 200, type = "dens_overlay_grouped", 
+         group = "Gender") + xlab("Gender")
+pp_check(model5, ndraws = 200, type = "dens_overlay", 
+         resp = "MotionSickness") + xlab("MotionSickness")
+pp_check(model5, type = "bars_grouped", group = "VRHeadset") + xlab("VRHeadset")
+pp_check(model5, type = "bars_grouped", group = "Gender") + xlab("Gender")
+pp_check(model5, type = "bars_grouped", group = "MotionSickness") + 
+  xlab("MotionSickness")
+```
+
+The model seems to fit quite well. Especially for the variables: "Motion Sickness", "Gender", and "VR Headset", the variability could be refined and the fit could be a bit better.
+
+## 5. Model Comparison (1.5pt)
+
+a.  Use loo or k-fold cross-validation to compare the models.
+
+```{r Model Comparison, error=FALSE, message=FALSE, warning=FALSE}
+cv <- loo(model1,model2,model3,model4,model5,compare = T)
+best_model <- attr(cv$diffs,which = 'dimnames')[[1]][1]
+cv
+```
+
+b.  Determine the best model based on predictive accuracy and justify your decision.
+
+```{r Graphs, error=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+print(paste0('The best model in absolute terms is: ',best_model))
+modellist <- list(model1,model2,model3,model4,model5)
+classification <- function(model,data,cutoff,response){
+  # Sample from the posterior
+  predicted <- posterior_predict(object = model,newdata = data)
+  # Calculate the proportions of 1s for each data-point
+  predicted_prop <- colMeans(x = predicted)
+  # Depending on the cut-off classify as 1 or 0
+  predicted <- as.factor(ifelse(test = predicted_prop >= cutoff,yes = 1,no = 0))
+  # using carets confusionmatrix because the table() doesnt play nice
+  clastab <- confusionMatrix(data = predicted,
+                             reference = as.factor(response),
+                             positive = '1')$table
+  # Accuracy rates
+  precision = clastab[2,2]/(clastab[2,2] + clastab[1,2])
+  recall = clastab[2,2]/(clastab[2,2] + clastab[1,1])
+  accuracy = (clastab[1,1] + clastab[2,2])/sum(clastab)
+  return(list(classification = clastab,
+              accuracy_rates = as.numeric(c(accuracy,recall,precision))))
+}
+
+calc_cutoff <- function(modellist,stepsize,data,response){
+  # Create a sequence of steps to take
+  sequence <- seq(0,1,stepsize)
+  # Create a 3 dimensional array to store the data on accuracy rates in for each model
+  accarr_array <- array(data = NA,dim = c(length(sequence),3,length(modellist)))
+  # Calculate accuracy rates for each model for each possible cutoff specified in sequence
+  for(model in 1:length(modellist)){
+    for(i in 1:length(sequence)){
+      acc_rates <- classification(model = modellist[[model]],data = data,
+                                  cutoff = sequence[i],
+                                  response = response)$accuracy_rates
+      accarr_array[i,,model] <- acc_rates
+    }
+  }
+  # Create modelnames
+  modelnames <- c()
+  for(i in 1:length(modellist)){
+    modelnames[i] <- paste0('model ',i)
+  }
+  # Return array to matrix form
+  arr2mat <- matrix(data = accarr_array,nrow = length(sequence)*length(modellist),
+                    ncol = 3)
+  # Convert matrix to dataframe for compatability with ggplot2
+  # and paste modelnames + cutoff to the side
+  arr2mat <- as.data.frame(cbind(arr2mat,rep(x = modelnames,each = length(sequence))))
+  arr2mat <- as.data.frame(cbind(arr2mat,rep(x = sequence,times = length(modellist))))
+  # Give colnames
+  colnames(arr2mat) <- c('Accuracy','Recall','Precision','Model','Cut-off')
+  # Melt to long-format from wide
+  for(i in 1:dim(arr2mat)[2]){
+    if((class(arr2mat[,i]) == 'character') & ( i != 4)){
+      arr2mat[,i] <- as.numeric(arr2mat[,i])
+    }
+  }
+  arr2mat
+}
+
+# Create data
+dat <- calc_cutoff(modellist = modellist,stepsize = 0.1,data = data,
+                   response = data$ImmersionLevel)
+
+# Plot accuracy rates separetly and models combined
+ggplot(data = dat,aes(x = `Cut-off`,y = Accuracy,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Accuracy') + scale_y_continuous(breaks = seq(0,1,0.05)) 
+ggplot(data = dat,aes(x = `Cut-off`,y = Recall,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Recall') + scale_y_continuous(breaks = seq(0,1,0.05)) 
+ggplot(data = dat,aes(x = `Cut-off`,y = Precision,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Precision') + scale_y_continuous(breaks = seq(0,1,0.05))
+
+# Plot rates separately and by model
+ggplot(data = dat,aes(x = `Cut-off`,y = Accuracy,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Accuracy') + scale_y_continuous(breaks = seq(0,1,0.05)) + 
+  facet_grid(~Model) 
+ggplot(data = dat,aes(x = `Cut-off`,y = Recall,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Recall') + scale_y_continuous(breaks = seq(0,1,0.05))  + 
+  facet_grid(~Model) 
+ggplot(data = dat,aes(x = `Cut-off`,y = Precision,group = Model, color = Model)) + 
+  geom_line() + ggtitle('Precision') + scale_y_continuous(breaks = seq(0,1,0.05)) + 
+  facet_grid(~Model)
+
+```
+
+The best model so far seems to be model 2. However, the parsimony principle would suggest we favor the first model, a pooled model, over model 2. Though model 2 performed best in absolute terms, there appears no added benefit of using a hierarchical model over a simple pooled model.
+
+Above you find the graphs for three metrics used: Accuracy, Recall and Precision. For varying cut-off scores we calculated the corresponding metrics in order to find an optimal cut-off score for the candidate models. We find that the best cut-off score is in the 40-50% area.
+
+As the graph shows, depending on what metric is most valued, high recall, precision or accuracy one can choose from the available 5 models. All models perform well in two out of three metrics, of which the trade-off in precision, recall or accuracy can be made by the end-user.
+
+## 6. Interpretation of Important Parameters (1.5pt)
+
+Choose one of the best models and interpret its most important parameters in the context of the research question.
+
+-   Interpretation of Model 1 and Model 2 - Ebenezer (model 2) & Hamza (model 1)
+
+**Model 1 - Discussion**
+
+```{r Summary Model 1, error=FALSE, message=FALSE, warning=FALSE}
+# Return parameters Model 1
+summary(model1)
+```
+
+When both age and duration are zero, the odds of being at a higher level of immersion are about 1.35 (e\^0.36) times greater than the odds of not being at a higher level of immersion. The coefficient for duration (0.12) suggests that for each one unit increase in duration, the odds of being at a higher level of immersion increase by a factor of e\^(0.12), which is approximately 1.13. Similarly, the coefficient for age (-0.02) suggests that for each one unit increase in age, the odds of being at a higher level of immersion decrease by a factor of e\^(-0.02), i.e 0.98.
+
+**Model 2 - Discussion**
+
+```{r Summary Model 2, error=FALSE, message=FALSE, warning=FALSE}
+# Return parameters Model 2
+summary(model2)
+```
+
+The second model was a varying intercept model. An exhaustive search was performed using a frequentist approach using the `MuMIn` package, which returned a list of top 10 combinations of best predictive variables. Afterwards, these 10 models were fit using `brms`\`s `brm` function of which the `loo_compare` function in the `loo` package determined a combination of Duration and Motion Sickness had the best predictive accuracy. Though Gender also being a reasonable grouping variable, VR Headset was ultimately chosen since it is both manipulable and can help in making business decisions in regards to using a particular type of headset for optimal user experience.
+
+The coefficients of this model are based on a mean-centered ordinal variable (Motion Sickness) ranging from 1-10 and on continuous centered data (Duration). We interpret Duration from the perspective of standard deviations deviating from the grand mean of Duration and Motion Sickness as raw points deviating from the mean as well.
+
+Please mind, the coefficients shown above are the logged values. Below, we exponentiate them to find the multiplicative effect for every unit increase in the two variables of this model. In other words, the exponentiated values are the values we multiply the base probability with for every unit increase of the variable in question. We find that the marginal fixed effect of Motion Sickness is negative, such that increasing levels of Motion Sickness has a negative effect on the predicted probability of feeling Immersed. Every unit increase from the average Motion Sickness decreases the base probability (provided by 'Intercept' , which is 59%) of feeling Immersed by 10%. However, the fixed effect of Duration is positively associated with Immersion, suggesting that as individuals spend more time with the VR Headset on, the predicted experienced Immersion increases. For every standard deviation unit increase of time spent with the VR Headset increases the base probability of feeling immersed by 12%.
+
+```{r Exp Summary Model 2, error=FALSE, message=FALSE, warning=FALSE}
+summod2 <- summary(model2)
+exp(summod2$fixed)
+```
+
+Group-level effects show us the following:
+
+```{r Ran_eff Model 2, error=FALSE, message=FALSE, warning=FALSE}
+ranef(model2,robust = T)
+```
+
+The data above provides us the group-level intercepts of the three headsets included in the model. Here 1 corresponds with the 'HTC Vive' , 2 with the 'Playstation VR' and 3 with the 'Oculus Rift'. We make use of robust coefficients by using the median as the central tendency parameter and the measure of variability being the MAD.
+
+Interpreting these (logged) group-level effects show us estimates that are offsets from the population-level intercept shown earlier, representing the base probability of an individual feeling immersed. As such, we can conclude that the 'Oculus Rift' VR Headset is the largest. However, the standard error of not just this VR Headset but all of the VR Headsets are large enough that they do not significantly deviate from zero, as we can see zero being well within the 2.5% and 97.5% interval. As such we can neglect including the group-level effects when making predictions about the probability of an individual feeling Immersed or not.
+
+We can conclude that a pooled model is probably the better and more parsimonious model to represent this data set given our results in section 5 where model 1 in absolute terms did not significantly differ in predictive accuracy from model 2, or any other of the more complex models. However, as mentioned previously in section 5, depending on the desired model metrics and associated optimal cut-off scores the end-user may opt for a different model than model 2 or model 1.
+
+**Considerations between using a pooled model and a (Generalized) Multilevel Model**
+
+*Reasons for choosing a (Generalized) Multilevel Model*
+
+There are a few considerations to consider when deciding between using a Multilevel Model or not using a Multilevel model. Some key factors for using a Multilevel model are:
+
+Multilevel models are suitable when the data has a hierarchical or nested structure. For example, when it's collected from individuals within groups or when it consists of repeated measurements over time. They can capture the variability at multiple levels and account for dependencies among observations.\*
+
+Multilevel models allow for the incorporation of prior information or beliefs about the parameters into the analysis. This can be helpful when you have prior knowledge about the data generating process or when you want to update your beliefs based on previous studies.\*
+
+Multilevel models can handle situations where you have limited data at the individual level but have enough groups. By borrowing strength from other groups, the multilevel structure can provide more stable and reliable estimates than standard models that treat all observations as independent.
+
+*Reasons why not to use (Generalized) Multilevel Model*
+
+The data does not have a hierarchical structure, and the observations can be considered as independent from one another.
+
+You want the model to be simpler to interpret. These may be more suitable when you have a relatively small dataset, limited computational resources, or when the research question can be adequately addressed without considering group-level effects.
+
+You have reasons to believe that the effects of predictors are constant across all groups, there may be no need for a multilevel model. Non-multilevel models assume that the relationships between predictors and the outcome variable are the same for all observations.
+
+Non multilevel models can be computationally more efficient, especially when dealing with large datasets, as they do not involve estimating multiple levels of parameters.
+
+**On Priors**
+
+Priors are assumptions or beliefs about the distribution of the parameters in a statistical model. In this case, the priors are specified for the standard deviation (sd) of the data in a logistic regression model.
+
+The prior for the standard deviation is set as an exponential distribution with a rate parameter calculated as the reciprocal of the standard deviation of the ImmersionLevel variable in the dataset. This choice of prior is considered uninformative, meaning it does not strongly influence the model and allows the data to drive the inference.
+
+Using an uninformative prior helps avoid biasing the results based on strong prior assumptions. By using a relatively flat prior distribution, the model becomes more reliant on the data itself to estimate the parameters.
+
+These priors are chosen to be relatively uninformative, allowing the model to rely more on the observed data to estimate the parameters of interest.
+
+## 7. Utility theory. Bonus (Optional for 2 extra pts)
+
+Derive a utility function and demonstrate how it can be used to make an optimal decision based on the fitted models and their parameters.
+
+```{r Utility Model 1, error=FALSE, message=FALSE, warning=FALSE}
+m_U <- brm(ImmersionLevel ~ Age + Gender + VRHeadset + Duration + MotionSickness,
+                      data = data, family = bernoulli(), file = 'm_U', save_model = 'm_U')
+
+find_optimal_motion_sickness <- function(age, gender, vr_headset, duration) {
+  motion_sickness_range <- seq(0, 10, 1)
+  predicted_immersions <- sapply(motion_sickness_range, function(ms) {
+    new_data <- data.frame(Age = age, Gender = as.numeric(gender), 
+                           VRHeadset = vr_headset,
+                           Duration = duration, MotionSickness = ms)
+    predict(m_U, newdata = new_data, type = "response")
+  })
+  optimal_ms <- motion_sickness_range[which.max(predicted_immersions)]
+  return(optimal_ms)
+}
+
+age <- 0.5
+gender <- 1
+vr_headset <- 2
+duration <- 1
+optimal_motion_sickness <- find_optimal_motion_sickness(age, gender, vr_headset, duration)
+print(optimal_motion_sickness)
+
+```
+
+A utility function is generated to find the optimal level of motion sickness which maximizes the predicted immersion level for a given set of variables. Based on the input values of age = 0.5, gender = 1, vr_headset = 2, and duration = 1, the optimal level of motion sickness is 3 in this case.
+
+# Contributions of each member
+
+-   Hamza Sajjad: Complete Pooling Model (Section 3-4) - Section 6 (Interpretation model 1) - Section 7
+-   Ebenezer Tafese: Varying Intercepts Model (Section 3-4), Section 5, Overall code contribution management - Section 6 (Interpretation model 2))
+-   Kafia Elmi: Varying Slopes Model (Section 3-4)- Section 6 (Priors)
+-   Natalia Latinović: Varying Intercept and Varying Slopes Model (Section 3-4)- Section 6 (Considerations)
+-   Bas Verkennis: Search dataset, write question 1, Correlated Varying Intercept and Varying Slopes Model (Section 3-4)
+
+# References
+
+Akash, J. (n.d.). *Virtual Reality Experiences: Analyzing VR user experiences improves design, comfort, and customization.* [Kaggle]. <https://www.kaggle.com/datasets/aakashjoshi123/virtual-reality-experiences>
